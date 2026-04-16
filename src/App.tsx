@@ -34,21 +34,20 @@ import {
   Layers,
   ShieldCheck,
   Package,
-  FileText
+  FileText,
+  ArrowRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Papa from 'papaparse';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5Qrcode } from 'html5-qrcode';
-import { onSnapshot, collection, doc, setDoc, updateDoc, deleteDoc, writeBatch, query, where, getDocs } from 'firebase/firestore';
-import { onAuthStateChanged, User } from 'firebase/auth';
 import { Category, Product, Characteristic } from './types';
 import { initialCategories } from './initialData';
 import { initialProducts } from './productsData';
-import { db, auth, signInAsAdmin, logOut, handleFirestoreError, OperationType } from './firebase';
 
-const STORAGE_KEY = 'catalog_categories';
-const PRODUCTS_STORAGE_KEY = 'catalog_products_v2';
+const STORAGE_KEY = 'catalog_categories_v3';
+const PRODUCTS_STORAGE_KEY = 'catalog_products_v3';
+const ADMIN_PASSWORD_KEY = 'catalog_admin_password_v3';
 
 export const parseValueAndUnit = (val: string): { value: string, unit: string } => {
   if (!val) return { value: '', unit: '' };
@@ -1380,18 +1379,23 @@ const QRScannerModal: React.FC<{
 };
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isComputer, setIsComputer] = useState(window.innerWidth >= 768);
   const [isGuest, setIsGuest] = useState(false);
-  const [adminPassword, setAdminPassword] = useState<string | null>(null);
+  const [adminPassword, setAdminPassword] = useState<string | null>(() => localStorage.getItem(ADMIN_PASSWORD_KEY));
   const [isPasswordVerified, setIsPasswordVerified] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [passwordMode, setPasswordMode] = useState<'verify' | 'setup'>('verify');
   const [passwordInput, setPasswordInput] = useState('');
   
-  const [categories, setCategories] = useState<Category[]>(initialCategories);
-  const [products, setProducts] = useState<Product[]>(initialProducts);
+  const [categories, setCategories] = useState<Category[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : initialCategories;
+  });
+  const [products, setProducts] = useState<Product[]>(() => {
+    const saved = localStorage.getItem(PRODUCTS_STORAGE_KEY);
+    return saved ? JSON.parse(saved) : initialProducts;
+  });
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAddingRoot, setIsAddingRoot] = useState(false);
@@ -1409,47 +1413,36 @@ export default function App() {
   const [initialProductHandled, setInitialProductHandled] = useState(false);
   const [globalSearchTerm, setGlobalSearchTerm] = useState('');
   const isSigningInRef = useRef(false);
+  const [isAuthErrorModalOpen, setIsAuthErrorModalOpen] = useState(false);
 
   const [isAdmin, setIsAdmin] = useState(false);
   const isCollector = isGuest;
   const canEdit = isAdmin && isPasswordVerified;
   const isAuthenticated = isAdmin || isGuest;
 
+  // Persistence
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(categories));
+  }, [categories]);
+
+  useEffect(() => {
+    localStorage.setItem(PRODUCTS_STORAGE_KEY, JSON.stringify(products));
+  }, [products]);
+
+  useEffect(() => {
+    if (adminPassword) {
+      localStorage.setItem(ADMIN_PASSWORD_KEY, adminPassword);
+    } else {
+      localStorage.removeItem(ADMIN_PASSWORD_KEY);
+    }
+  }, [adminPassword]);
+
   // Handle window resize
   useEffect(() => {
     const handleResize = () => setIsComputer(window.innerWidth >= 768);
     window.addEventListener('resize', handleResize);
+    setIsAuthReady(true);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  // Firebase Auth Listener
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (u) {
-        setIsGuest(false);
-        if (u.isAnonymous) {
-          setIsAdmin(true);
-        }
-      } else {
-        setIsPasswordVerified(false);
-        setIsAdmin(false);
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Fetch Admin Password
-  useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'settings', 'admin'), (docSnap) => {
-      if (docSnap.exists()) {
-        setAdminPassword(docSnap.data().password || null);
-      } else {
-        setAdminPassword(null);
-      }
-    });
-    return () => unsub();
   }, []);
 
   // Trigger password modal when admin logs in
@@ -1465,131 +1458,41 @@ export default function App() {
     }
   }, [isAdmin, isPasswordVerified, adminPassword]);
 
-  // Firebase Real-time Sync
-  useEffect(() => {
-    const unsubCats = onSnapshot(collection(db, 'categories'), (snapshot) => {
-      const cats: Category[] = [];
-      snapshot.forEach((doc) => cats.push(doc.data() as Category));
-      
-      // Reconstruct tree structure and sort by order
-      const buildTree = (list: Category[], parentId: string | null = null): Category[] => {
-        return list
-          .filter(c => (c.parentId || null) === parentId)
-          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-          .map(c => ({
-            ...c,
-            subcategories: buildTree(list, c.id)
-          }));
-      };
-      
-      const tree = buildTree(cats, null);
-      if (tree.length > 0) {
-        setCategories(tree);
-      } else if (cats.length === 0) {
-        setCategories([]);
-      } else {
-        // Fallback for flat list
-        setCategories(cats.filter(c => !c.parentId).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)));
-      }
-    }, (error) => {
-      console.error("Error syncing categories:", error);
-    });
-
-    const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
-      const prods: Product[] = [];
-      snapshot.forEach((doc) => prods.push(doc.data() as Product));
-      // Sort products by order
-      setProducts(prods.sort((a, b) => (a.order ?? 0) - (b.order ?? 0)));
-    }, (error) => {
-      console.error("Error syncing products:", error);
-    });
-
-    return () => {
-      unsubCats();
-      unsubProducts();
-    };
-  }, []);
-
-  // Seed initial data if DB is empty (only for admin)
-  useEffect(() => {
-    if (canEdit && categories.length === 0 && products.length === 0) {
-      const seedData = async () => {
-        try {
-          const batch = writeBatch(db);
-          
-          const flattenCategories = (cats: Category[], parentId: string | null = null): any[] => {
-            let flat: any[] = [];
-            cats.forEach((c, index) => {
-              flat.push({ id: c.id, name: c.name, parentId: parentId, order: index });
-              if (c.subcategories && c.subcategories.length > 0) {
-                flat = [...flat, ...flattenCategories(c.subcategories, c.id)];
-              }
-            });
-            return flat;
-          };
-
-          const flatCats = flattenCategories(initialCategories);
-          flatCats.forEach(c => {
-            const ref = doc(db, 'categories', c.id);
-            batch.set(ref, { ...c, subcategories: [] });
-          });
-
-          initialProducts.forEach((p, index) => {
-            const ref = doc(db, 'products', p.id);
-            batch.set(ref, { ...p, order: index });
-          });
-
-          await batch.commit();
-          showToast('База данных инициализирована начальными данными', 'success');
-        } catch (error) {
-          console.error("Error seeding data:", error);
-          handleFirestoreError(error, OperationType.WRITE, 'initial_seed');
-        }
-      };
-      seedData();
-    }
-  }, [canEdit, categories.length, products.length]);
-
   const handleDeduplicateCategories = async () => {
     if (!canEdit) return;
     
     try {
       showToast('Поиск и удаление дубликатов...', 'success');
       
-      // Get all categories from Firestore to be sure we have everything
-      const snapshot = await getDocs(collection(db, 'categories'));
-      const allCats: Category[] = [];
-      snapshot.forEach(doc => allCats.push(doc.data() as Category));
+      // We need a flat list to find duplicates
+      const getFlat = (cats: Category[]): Category[] => {
+        let flat: Category[] = [];
+        cats.forEach(c => {
+          flat.push(c);
+          if (c.subcategories) flat = [...flat, ...getFlat(c.subcategories)];
+        });
+        return flat;
+      };
       
+      const flatCats = getFlat(categories);
       const groups: Record<string, Category[]> = {};
-      allCats.forEach(cat => {
+      
+      flatCats.forEach(cat => {
         const key = `${cat.parentId || 'root'}:${cat.name.trim().toLowerCase()}`;
         if (!groups[key]) groups[key] = [];
         groups[key].push(cat);
       });
       
       const toDelete: string[] = [];
-      const productMoves: { from: string, to: string }[] = [];
-      const categoryMoves: { from: string, to: string }[] = [];
+      const moves: { from: string, to: string }[] = [];
       
       for (const key in groups) {
         const group = groups[key];
         if (group.length > 1) {
-          // Keep the first one, merge others into it
           const keep = group[0];
           for (let i = 1; i < group.length; i++) {
-            const duplicate = group[i];
-            toDelete.push(duplicate.id);
-            
-            // Collect moves for products
-            productMoves.push({ from: duplicate.id, to: keep.id });
-            
-            // Collect moves for subcategories
-            allCats.forEach(c => {
-              if (c.parentId === duplicate.id) {
-                categoryMoves.push({ from: duplicate.id, to: keep.id });
-              }
-            });
+            toDelete.push(group[i].id);
+            moves.push({ from: group[i].id, to: keep.id });
           }
         }
       }
@@ -1598,35 +1501,28 @@ export default function App() {
         showToast('Дубликатов не обнаружено', 'success');
         return;
       }
-      
-      const batch = writeBatch(db);
-      
-      // Delete duplicates
-      toDelete.forEach(id => {
-        batch.delete(doc(db, 'categories', id));
+
+      setCategories(prev => {
+        const updateParent = (list: Category[]): Category[] => {
+          return list
+            .filter(c => !toDelete.includes(c.id))
+            .map(c => {
+              const move = moves.find(m => m.from === c.parentId);
+              return {
+                ...c,
+                parentId: move ? move.to : c.parentId,
+                subcategories: c.subcategories ? updateParent(c.subcategories) : []
+              };
+            });
+        };
+        return updateParent(prev);
       });
+
+      setProducts(prev => prev.map(p => {
+        const move = moves.find(m => m.from === p.categoryId);
+        return move ? { ...p, categoryId: move.to } : p;
+      }));
       
-      // Move subcategories
-      const subSnapshot = await getDocs(collection(db, 'categories'));
-      subSnapshot.forEach(d => {
-        const cat = d.data() as Category;
-        const move = categoryMoves.find(m => m.from === cat.parentId);
-        if (move) {
-          batch.update(d.ref, { parentId: move.to });
-        }
-      });
-      
-      // Move products
-      const prodSnapshot = await getDocs(collection(db, 'products'));
-      prodSnapshot.forEach(d => {
-        const prod = d.data() as Product;
-        const move = productMoves.find(m => m.from === prod.categoryId);
-        if (move) {
-          batch.update(d.ref, { categoryId: move.to });
-        }
-      });
-      
-      await batch.commit();
       showToast(`Удалено дубликатов: ${toDelete.length}`, 'success');
     } catch (error) {
       console.error("Error deduplicating categories:", error);
@@ -1638,15 +1534,11 @@ export default function App() {
     if (!passwordInput.trim()) return;
 
     if (passwordMode === 'setup') {
-      try {
-        await setDoc(doc(db, 'settings', 'admin'), { password: passwordInput });
-        setIsPasswordVerified(true);
-        setIsPasswordModalOpen(false);
-        setPasswordInput('');
-        showToast('Пароль администратора установлен', 'success');
-      } catch (error) {
-        showToast('Ошибка при сохранении пароля', 'error');
-      }
+      setAdminPassword(passwordInput);
+      setIsPasswordVerified(true);
+      setIsPasswordModalOpen(false);
+      setPasswordInput('');
+      showToast('Пароль администратора установлен', 'success');
     } else {
       if (passwordInput === adminPassword) {
         setIsPasswordVerified(true);
@@ -1663,46 +1555,20 @@ export default function App() {
     if (!canEdit) return;
     if (!window.confirm('Вы уверены, что хотите полностью сбросить базу данных к начальному состоянию? Все текущие изменения будут удалены.')) return;
 
-    try {
-      showToast('Сброс базы данных...', 'success');
-      
-      // Clear local state first to show immediate feedback
-      setCategories([]);
-      setProducts([]);
-      setSelectedCategoryId(null);
-      setGlobalSearchTerm('');
-
-      // Delete all categories
-      const catSnapshot = await getDocs(collection(db, 'categories'));
-      const catBatch = writeBatch(db);
-      catSnapshot.forEach(d => catBatch.delete(d.ref));
-      await catBatch.commit();
-
-      // Delete all products
-      const prodSnapshot = await getDocs(collection(db, 'products'));
-      const prodBatch = writeBatch(db);
-      prodSnapshot.forEach(d => prodBatch.delete(d.ref));
-      await prodBatch.commit();
-
-      showToast('База данных успешно очищена. Инициализация...', 'success');
-      // The seed useEffect will trigger because categories.length and products.length are now 0
-    } catch (error) {
-      console.error("Error resetting database:", error);
-      showToast('Ошибка при сбросе базы данных', 'error');
-    }
+    showToast('Сброс базы данных...', 'success');
+    
+    // Clear local state
+    setCategories([]);
+    setProducts([]);
+    setSelectedCategoryId(null);
+    setGlobalSearchTerm('');
+    
+    showToast('База данных успешно очищена.', 'success');
   };
 
   const handleSignIn = async () => {
-    if (isSigningInRef.current) return;
-    isSigningInRef.current = true;
-    try {
-      await signInAsAdmin();
-      showToast('Вход выполнен успешно', 'success');
-    } catch (error: any) {
-      showToast('Ошибка при входе: ' + error.message, 'error');
-    } finally {
-      isSigningInRef.current = false;
-    }
+    setIsAdmin(true);
+    showToast('Вход выполнен успешно', 'success');
   };
 
   const handleBOMImport = (file: File) => {
@@ -1718,19 +1584,14 @@ export default function App() {
 
         try {
           showToast('Импорт BOM...', 'success');
-          const batch = writeBatch(db);
-          
-          // Get existing categories to map names to IDs
-          const catSnapshot = await getDocs(collection(db, 'categories'));
-          const currentCats = catSnapshot.docs.map(d => d.data() as Category);
           
           let importedCount = 0;
+          const newProducts: Product[] = [];
+          const newCategories: Category[] = [...categories];
           const cleanKey = (k: string) => k.toLowerCase().trim().replace(/^\uFEFF/, '').replace(/^["']|["']$/g, '');
 
           for (const row of data) {
             const keys = Object.keys(row);
-            
-            // Try to find Name, Category, and other fields
             const nameKey = keys.find(k => ['название', 'name', 'item', 'компонент'].includes(cleanKey(k)));
             const catKey = keys.find(k => ['категория', 'category', 'group', 'группа'].includes(cleanKey(k)));
             
@@ -1739,26 +1600,22 @@ export default function App() {
             
             if (!name) continue;
 
-            // Find or create category
             let categoryId = 'uncategorized';
-            const existingCat = currentCats.find(c => c.name.toLowerCase() === categoryName.toLowerCase());
+            const existingCat = newCategories.find(c => c.name.toLowerCase() === categoryName.toLowerCase());
             
             if (existingCat) {
               categoryId = existingCat.id;
             } else {
-              // Create new root category if not found
               categoryId = `cat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
               const newCat: Category = {
                 id: categoryId,
                 name: categoryName,
                 subcategories: [],
-                order: currentCats.length + importedCount
+                order: newCategories.length + importedCount
               };
-              batch.set(doc(db, 'categories', categoryId), newCat);
-              currentCats.push(newCat); // Add to local list for next rows
+              newCategories.push(newCat);
             }
 
-            // Extract characteristics (all other fields)
             const characteristics: Characteristic[] = [];
             keys.forEach(k => {
               if (k !== nameKey && k !== catKey && row[k]?.trim()) {
@@ -1770,19 +1627,18 @@ export default function App() {
             });
 
             const productId = `prod_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            const newProduct: Product = {
+            newProducts.push({
               id: productId,
               categoryId,
               name,
               characteristics,
               order: Date.now() + importedCount
-            };
-
-            batch.set(doc(db, 'products', productId), newProduct);
+            });
             importedCount++;
           }
 
-          await batch.commit();
+          setCategories(newCategories);
+          setProducts(prev => [...prev, ...newProducts]);
           showToast(`Импортировано товаров из BOM: ${importedCount}`, 'success');
         } catch (error) {
           console.error("BOM Import Error:", error);
@@ -1793,28 +1649,20 @@ export default function App() {
   };
 
   const handleLogOut = async () => {
-    try {
-      if (isGuest) {
-        setIsGuest(false);
-        showToast('Выход выполнен', 'success');
-        return;
-      }
-      await logOut();
-      setIsPasswordVerified(false);
+    if (isGuest) {
+      setIsGuest(false);
       showToast('Выход выполнен', 'success');
-    } catch (error: any) {
-      showToast('Ошибка при выходе: ' + error.message, 'error');
+      return;
     }
+    setIsAdmin(false);
+    setIsPasswordVerified(false);
+    showToast('Выход выполнен', 'success');
   };
 
   const switchToCollector = async () => {
-    try {
-      await logOut();
-      setIsGuest(true);
-      showToast('Переключено на режим сборщика', 'success');
-    } catch (error: any) {
-      showToast('Ошибка при переключении: ' + error.message, 'error');
-    }
+    setIsAdmin(false);
+    setIsGuest(true);
+    showToast('Переключено на режим сборщика', 'success');
   };
 
   const switchToAdmin = async () => {
@@ -2067,10 +1915,7 @@ export default function App() {
 
   const handleCheckout = async () => {
     try {
-      const batch = writeBatch(db);
-      let updatedCount = 0;
-
-      products.forEach(product => {
+      setProducts(prev => prev.map(product => {
         const cartQty = cart[product.id];
         if (cartQty) {
           const newCharacteristics = product.characteristics.map(char => {
@@ -2081,22 +1926,17 @@ export default function App() {
             }
             return char;
           });
-          
-          const ref = doc(db, 'products', product.id);
-          batch.update(ref, { characteristics: newCharacteristics });
-          updatedCount++;
+          return { ...product, characteristics: newCharacteristics };
         }
-      });
-
-      if (updatedCount > 0) {
-        await batch.commit();
-      }
+        return product;
+      }));
       
       showToast('Заказ успешно оформлен!', 'success');
       setCart({});
       setIsCartModalOpen(false);
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'products');
+      console.error("Checkout error:", error);
+      showToast('Ошибка при оформлении заказа', 'error');
     }
   };
 
@@ -2142,33 +1982,23 @@ export default function App() {
       order: Date.now()
     };
 
-    try {
-      await setDoc(doc(db, 'categories', newCat.id), newCat);
-      if (!parentId) {
-        setIsAddingRoot(false);
-      } else {
-        setAddingSubTo(null);
-      }
-      if (nameOverride === undefined) {
-        setNewName('');
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'categories');
+    setCategories(prev => [...prev, newCat]);
+    if (!parentId) {
+      setIsAddingRoot(false);
+    } else {
+      setAddingSubTo(null);
+    }
+    if (nameOverride === undefined) {
+      setNewName('');
     }
   };
 
   const updateCategory = async () => {
     if (!editingCategory || !newName.trim()) return;
 
-    try {
-      await updateDoc(doc(db, 'categories', editingCategory.id), {
-        name: newName.trim()
-      });
-      setEditingCategory(null);
-      setNewName('');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, 'categories');
-    }
+    setCategories(prev => prev.map(c => c.id === editingCategory.id ? { ...c, name: newName.trim() } : c));
+    setEditingCategory(null);
+    setNewName('');
   };
 
   const deleteCategory = async (id: string) => {
@@ -2183,64 +2013,56 @@ export default function App() {
     if (!categoryToDelete) return;
     const id = categoryToDelete;
     
-    try {
-      showToast('Удаление категории...', 'success');
-      
-      const getSubIds = (cats: Category[], targetId: string): string[] => {
-        for (const cat of cats) {
-          if (cat.id === targetId) {
-            const ids = [cat.id];
-            const collect = (c: Category) => {
-              if (c.subcategories) {
-                c.subcategories.forEach(s => {
-                  ids.push(s.id);
-                  collect(s);
-                });
-              }
-            };
-            collect(cat);
-            return ids;
-          }
-          if (cat.subcategories) {
-            const found = getSubIds(cat.subcategories, targetId);
-            if (found.length > 0) return found;
-          }
+    showToast('Удаление категории...', 'success');
+    
+    const getSubIds = (cats: Category[], targetId: string): string[] => {
+      for (const cat of cats) {
+        if (cat.id === targetId) {
+          const ids = [cat.id];
+          const collect = (c: Category) => {
+            if (c.subcategories) {
+              c.subcategories.forEach(s => {
+                ids.push(s.id);
+                collect(s);
+              });
+            }
+          };
+          collect(cat);
+          return ids;
         }
-        return [];
-      };
-
-      const idsToDelete = getSubIds(categories, id);
-      
-      const batch = writeBatch(db);
-      if (idsToDelete.length === 0) {
-        batch.delete(doc(db, 'categories', id));
-      } else {
-        idsToDelete.forEach(catId => {
-          batch.delete(doc(db, 'categories', catId));
-        });
+        if (cat.subcategories) {
+          const found = getSubIds(cat.subcategories, targetId);
+          if (found.length > 0) return found;
+        }
       }
-      await batch.commit();
-      
-      showToast('Категория удалена', 'success');
-      if (selectedCategoryId === id) setSelectedCategoryId(null);
-      setCategoryToDelete(null);
-    } catch (error) {
-      console.error("Error deleting category:", error);
-      handleFirestoreError(error, OperationType.DELETE, 'categories');
-    }
+      return [];
+    };
+
+    const idsToDelete = getSubIds(categories, id);
+    
+    setCategories(prev => prev.filter(c => !idsToDelete.includes(c.id)));
+    setProducts(prev => prev.filter(p => !idsToDelete.includes(p.categoryId)));
+    
+    showToast('Категория удалена', 'success');
+    if (selectedCategoryId === id) setSelectedCategoryId(null);
+    setCategoryToDelete(null);
   };
 
   const handleSaveProduct = async (productData: Omit<Product, 'id'>) => {
-    try {
-      const id = editingProduct ? editingProduct.id : generateId();
-      const order = editingProduct ? (editingProduct.order ?? Date.now()) : Date.now();
-      const product = { ...productData, id, order };
-      await setDoc(doc(db, 'products', id), product);
-      setIsProductModalOpen(false);
-      setEditingProduct(null);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'products');
-    }
+    const id = editingProduct ? editingProduct.id : generateId();
+    const order = editingProduct ? (editingProduct.order ?? Date.now()) : Date.now();
+    const product = { ...productData, id, order };
+    
+    setProducts(prev => {
+      if (editingProduct) {
+        return prev.map(p => p.id === id ? product : p);
+      } else {
+        return [...prev, product];
+      }
+    });
+    
+    setIsProductModalOpen(false);
+    setEditingProduct(null);
   };
 
   const handleDeleteProduct = (id: string) => {
@@ -2253,28 +2075,16 @@ export default function App() {
 
   const confirmDeleteProduct = async () => {
     if (!productToDelete) return;
-    try {
-      await deleteDoc(doc(db, 'products', productToDelete));
-      setProductToDelete(null);
-      showToast('Товар удален', 'success');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, 'products');
-    }
+    setProducts(prev => prev.filter(p => p.id !== productToDelete));
+    setProductToDelete(null);
+    showToast('Товар удален', 'success');
   };
 
   const confirmDeleteMultipleProducts = async () => {
     if (!productsToDeleteBulk) return;
-    try {
-      const batch = writeBatch(db);
-      productsToDeleteBulk.forEach(id => {
-        batch.delete(doc(db, 'products', id));
-      });
-      await batch.commit();
-      showToast(`Удалено товаров: ${productsToDeleteBulk.length}`, 'success');
-      setProductsToDeleteBulk(null);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, 'products');
-    }
+    setProducts(prev => prev.filter(p => !productsToDeleteBulk.includes(p.id)));
+    showToast(`Удалено товаров: ${productsToDeleteBulk.length}`, 'success');
+    setProductsToDeleteBulk(null);
   };
 
   const handleImportCategories = (file: File) => {
@@ -2289,13 +2099,8 @@ export default function App() {
         }
         
         try {
-          const batch = writeBatch(db);
           let importedCount = 0;
-          
-          // We need current flat categories for reference
-          const catSnapshot = await getDocs(collection(db, 'categories'));
-          const currentCats = catSnapshot.docs.map(d => d.data() as Category);
-          let tempCats = [...currentCats];
+          let tempCats = [...categories];
 
           const findCatByName = (list: Category[], name: string) => 
             list.find(c => c.name.toLowerCase() === name.toLowerCase());
@@ -2333,7 +2138,6 @@ export default function App() {
                   parentId: undefined,
                   order: Date.now() + importedCount
                 };
-                batch.set(doc(db, 'categories', newParentId), newParent);
                 tempCats.push(newParent);
                 parentId = newParentId;
                 importedCount++;
@@ -2350,16 +2154,15 @@ export default function App() {
                 parentId,
                 order: Date.now() + importedCount
               };
-              batch.set(doc(db, 'categories', newId), newCat);
               tempCats.push(newCat);
               importedCount++;
             }
           }
           
-          await batch.commit();
+          setCategories(tempCats);
           showToast(`Импортировано категорий: ${importedCount}`, 'success');
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, 'categories');
+          showToast('Ошибка при импорте категорий', 'error');
         }
       },
       error: (error) => {
@@ -2385,12 +2188,11 @@ export default function App() {
             return;
           }
           
-          const batch = writeBatch(db);
           let importedCount = 0;
           let updatedCount = 0;
           
-          const prodSnapshot = await getDocs(collection(db, 'products'));
-          const currentProds = prodSnapshot.docs.map(d => d.data() as Product);
+          const currentProds = [...products];
+          const newProducts: Product[] = [];
 
           const cleanKey = (k: string) => k ? k.toLowerCase().trim().replace(/^\uFEFF/, '').replace(/^["']|["']$/g, '') : '';
 
@@ -2445,9 +2247,10 @@ export default function App() {
               }
             });
 
-            const existing = currentProds.find(p => p.name.toLowerCase() === name.toLowerCase() && p.categoryId === selectedCategory.id);
+            const existingIdx = currentProds.findIndex(p => p.name.toLowerCase() === name.toLowerCase() && p.categoryId === selectedCategory!.id);
             
-            if (existing) {
+            if (existingIdx >= 0) {
+              const existing = currentProds[existingIdx];
               const updatedProduct = {
                 ...existing,
                 imageUrl: imageUrl || existing.imageUrl,
@@ -2464,28 +2267,28 @@ export default function App() {
                 }
               });
               
-              batch.set(doc(db, 'products', existing.id), updatedProduct);
+              currentProds[existingIdx] = updatedProduct;
               updatedCount++;
             } else {
               const newId = generateId();
               const newProduct: Product = {
                 id: newId,
-                categoryId: selectedCategory.id,
+                categoryId: selectedCategory!.id,
                 name,
                 imageUrl,
                 location,
                 characteristics,
                 order: Date.now() + index
               };
-              batch.set(doc(db, 'products', newId), newProduct);
+              newProducts.push(newProduct);
               importedCount++;
             }
           });
           
-          await batch.commit();
+          setProducts([...currentProds, ...newProducts]);
           showToast(`Добавлено: ${importedCount}, Обновлено: ${updatedCount}`, 'success');
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, 'products');
+          showToast('Ошибка при импорте товаров', 'error');
         }
       },
       error: (error) => {
@@ -2560,65 +2363,13 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-full bg-white text-[#1A1A1A] font-sans overflow-hidden">
-      {/* Password Modal */}
-      <AnimatePresence>
-        {isPasswordModalOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden"
-            >
-              <div className="p-6 text-center">
-                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mx-auto mb-4">
-                  <ShieldCheck size={24} />
-                </div>
-                <h3 className="text-xl font-bold text-gray-900 mb-2">
-                  {passwordMode === 'setup' ? 'Установка пароля' : 'Проверка пароля'}
-                </h3>
-                <p className="text-sm text-gray-500 mb-6">
-                  {passwordMode === 'setup' 
-                    ? 'Придумайте пароль для дополнительной защиты прав администратора' 
-                    : 'Введите пароль администратора для доступа к функциям управления'}
-                </p>
-                
-                <div className="space-y-4">
-                  <input 
-                    autoFocus
-                    type="password"
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handlePasswordSubmit()}
-                    placeholder="Введите пароль..."
-                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-center text-lg tracking-widest"
-                  />
-                  
-                  <div className="flex gap-3">
-                    <button 
-                      onClick={async () => {
-                        await logOut();
-                        setIsPasswordModalOpen(false);
-                        setPasswordInput('');
-                      }}
-                      className="flex-1 px-4 py-3 text-gray-600 font-medium hover:bg-gray-100 rounded-xl transition-colors"
-                    >
-                      Отмена
-                    </button>
-                    <button 
-                      onClick={handlePasswordSubmit}
-                      className="flex-1 px-4 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-all"
-                    >
-                      {passwordMode === 'setup' ? 'Сохранить' : 'Войти'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+    <div className="flex h-screen w-full bg-white text-[#1A1A1A] font-sans overflow-hidden flex-col">
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* Sidebar */}
+
+
+
+
 
       {/* Mobile Sidebar Backdrop */}
       {isSidebarOpen && (
@@ -2912,6 +2663,11 @@ export default function App() {
           </div>
         )}
       </main>
+      </div>
+
+      {/* Auth Error Modal removed */}
+
+
 
       {selectedCategory && (
         <ProductModal 
@@ -3043,6 +2799,66 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Password Modal */}
+      <AnimatePresence>
+        {isPasswordModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-6 text-center">
+                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center mx-auto mb-4">
+                  <ShieldCheck size={24} />
+                </div>
+                <h3 className="text-xl font-bold text-gray-900 mb-2">
+                  {passwordMode === 'setup' ? 'Установка пароля' : 'Проверка пароля'}
+                </h3>
+                <p className="text-sm text-gray-500 mb-6">
+                  {passwordMode === 'setup' 
+                    ? 'Придумайте пароль для дополнительной защиты прав администратора' 
+                    : 'Введите пароль администратора для доступа к функциям управления'}
+                </p>
+                
+                <div className="space-y-4">
+                  <input 
+                    autoFocus
+                    type="password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handlePasswordSubmit()}
+                    placeholder="Введите пароль..."
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-center text-lg tracking-widest"
+                  />
+                  
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => {
+                        setIsAdmin(false);
+                        setIsPasswordVerified(false);
+                        setIsPasswordModalOpen(false);
+                        setPasswordInput('');
+                      }}
+                      className="flex-1 px-4 py-3 text-gray-600 font-medium hover:bg-gray-100 rounded-xl transition-colors"
+                    >
+                      Отмена
+                    </button>
+                    <button 
+                      onClick={handlePasswordSubmit}
+                      className="flex-1 px-4 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-all"
+                    >
+                      {passwordMode === 'setup' ? 'Сохранить' : 'Войти'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {toastMessage && (
