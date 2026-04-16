@@ -45,11 +45,10 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { Category, Product, Characteristic } from './types';
 import { initialCategories } from './initialData';
 import { initialProducts } from './productsData';
-import { db, auth, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
+import { db, auth, signInAsAdmin, logOut, handleFirestoreError, OperationType } from './firebase';
 
 const STORAGE_KEY = 'catalog_categories';
 const PRODUCTS_STORAGE_KEY = 'catalog_products_v2';
-const ADMIN_EMAIL = 'monkedanik@gmail.com';
 
 export const parseValueAndUnit = (val: string): { value: string, unit: string } => {
   if (!val) return { value: '', unit: '' };
@@ -1411,10 +1410,10 @@ export default function App() {
   const [globalSearchTerm, setGlobalSearchTerm] = useState('');
   const isSigningInRef = useRef(false);
 
-  const isAdmin = user?.email === ADMIN_EMAIL;
+  const [isAdmin, setIsAdmin] = useState(false);
   const isCollector = isGuest;
   const canEdit = isAdmin && isPasswordVerified;
-  const isAuthenticated = !!user || isGuest;
+  const isAuthenticated = isAdmin || isGuest;
 
   // Handle window resize
   useEffect(() => {
@@ -1430,8 +1429,12 @@ export default function App() {
       setIsAuthReady(true);
       if (u) {
         setIsGuest(false);
+        if (u.isAnonymous) {
+          setIsAdmin(true);
+        }
       } else {
         setIsPasswordVerified(false);
+        setIsAdmin(false);
       }
     });
     return () => unsubscribe();
@@ -1693,16 +1696,10 @@ export default function App() {
     if (isSigningInRef.current) return;
     isSigningInRef.current = true;
     try {
-      await signInWithGoogle();
+      await signInAsAdmin();
       showToast('Вход выполнен успешно', 'success');
     } catch (error: any) {
-      if (error.code === 'auth/popup-closed-by-user') {
-        showToast('Окно входа было закрыто. Пожалуйста, попробуйте еще раз и не закрывайте окно до завершения.', 'error');
-      } else if (error.code === 'auth/cancelled-popup-request') {
-        // Ignore this one as it usually means another popup was opened
-      } else {
-        showToast('Ошибка при входе через Google: ' + error.message, 'error');
-      }
+      showToast('Ошибка при входе: ' + error.message, 'error');
     } finally {
       isSigningInRef.current = false;
     }
@@ -2539,7 +2536,7 @@ export default function App() {
               <ShieldCheck className="text-blue-600 group-hover:scale-110 transition-transform" />
               <div className="text-left">
                 <div className="text-sm font-bold text-gray-900">Администратор</div>
-                <div className="text-xs text-gray-500 font-normal">Полный доступ и управление</div>
+                <div className="text-xs text-gray-500 font-normal">Доступ по паролю</div>
               </div>
             </button>
 

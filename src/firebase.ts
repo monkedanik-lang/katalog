@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getAuth, signOut, signInAnonymously } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -7,14 +7,12 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
-export const signInWithGoogle = async () => {
-  const provider = new GoogleAuthProvider();
-  // Ensure the popup is triggered by a user gesture
+export const signInAsAdmin = async () => {
   try {
-    const result = await signInWithPopup(auth, provider);
+    const result = await signInAnonymously(auth);
     return result;
   } catch (error: any) {
-    console.error("Error signing in with Google", error);
+    console.error("Error signing in anonymously", error);
     throw error;
   }
 };
