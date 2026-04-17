@@ -116,6 +116,8 @@ const ProductTable: React.FC<{
   canEdit?: boolean;
 }> = ({ category, products, cart, onAddToCart, updateQuantity, setQuantity, removeFromCart, onSelectCategory, onBack, onAddProduct, onEditProduct, onDeleteProduct, onDeleteMultipleProducts, onAddSubcategory, onViewProduct, onImportProducts, onEditCategory, onDeleteCategory, onToggleSidebar, canEdit }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const searchRef = useRef<HTMLDivElement>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [charFilters, setCharFilters] = useState<Record<string, { min?: string, max?: string, text?: string }>>({});
   const [charFilterTypes, setCharFilterTypes] = useState<Record<string, 'numeric' | 'text'>>(() => {
@@ -157,8 +159,17 @@ const ProductTable: React.FC<{
     return match ? parseFloat(match[0]) : NaN;
   };
 
+  // Debounce search term
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
   const filteredProducts = products.filter(p => {
-    if (searchTerm && !p.name.toLowerCase().includes(searchTerm.toLowerCase())) {
+    const search = debouncedSearchTerm.toLowerCase().trim();
+    if (search && !p.name.toLowerCase().includes(search) && !p.id.toLowerCase().includes(search)) {
       return false;
     }
 
@@ -248,10 +259,15 @@ const ProductTable: React.FC<{
         </div>
         <div className="flex flex-col md:flex-row items-stretch md:items-center gap-4 mb-4">
           {category.id !== 'search' && (
-            <div className="relative flex-1 max-w-full md:max-w-md">
+            <div ref={searchRef} className="relative flex-1 max-w-full md:max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
               <input 
-                type="text"
+                type="search"
+                name="q"
+                id="category_search_input"
+                autoComplete="one-time-code"
+                data-lpignore="true"
+                data-1p-ignore
                 placeholder="Поиск по названию товара..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
@@ -259,7 +275,10 @@ const ProductTable: React.FC<{
               />
               {searchTerm && (
                 <button 
-                  onClick={() => setSearchTerm('')}
+                  onClick={() => {
+                    setSearchTerm('');
+                    setDebouncedSearchTerm('');
+                  }}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
                 >
                   <X size={16} />
@@ -1412,6 +1431,8 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<{text: string, type: 'success' | 'error'} | null>(null);
   const [initialProductHandled, setInitialProductHandled] = useState(false);
   const [globalSearchTerm, setGlobalSearchTerm] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const globalSearchRef = useRef<HTMLDivElement>(null);
   const isSigningInRef = useRef(false);
   const [isAuthErrorModalOpen, setIsAuthErrorModalOpen] = useState(false);
 
@@ -1420,7 +1441,11 @@ export default function App() {
   const canEdit = isAdmin && isPasswordVerified;
   const isAuthenticated = isAdmin || isGuest;
 
-  // Persistence
+  const handleSearch = (term: string) => {
+    setGlobalSearchTerm(term);
+    setSearchInput(term);
+    setSelectedCategoryId(null);
+  };
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(categories));
   }, [categories]);
@@ -1568,7 +1593,8 @@ export default function App() {
 
   const handleSignIn = async () => {
     setIsAdmin(true);
-    showToast('Вход выполнен успешно', 'success');
+    setIsPasswordVerified(false); // Force password verification
+    showToast('Переключение на режим администратора', 'success');
   };
 
   const handleBOMImport = (file: File) => {
@@ -1662,6 +1688,7 @@ export default function App() {
   const switchToCollector = async () => {
     setIsAdmin(false);
     setIsGuest(true);
+    setIsPasswordVerified(false); // Reset verification when leaving admin mode
     showToast('Переключено на режим сборщика', 'success');
   };
 
@@ -2396,7 +2423,7 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-1 flex-shrink-0">
-              {isAdmin && (
+              {isAdmin ? (
                 <button 
                   onClick={switchToCollector}
                   className="px-3 py-1 bg-blue-600 text-white text-[10px] font-bold rounded-full uppercase tracking-wider mr-1 hover:bg-blue-700 transition-all shadow-sm shadow-blue-100 border border-blue-500"
@@ -2404,8 +2431,7 @@ export default function App() {
                 >
                   Admin
                 </button>
-              )}
-              {isCollector && (
+              ) : isCollector ? (
                 <button 
                   onClick={switchToAdmin}
                   className="px-3 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-full uppercase tracking-wider mr-1 hover:bg-amber-600 transition-all shadow-sm shadow-amber-100 border border-amber-400"
@@ -2413,7 +2439,7 @@ export default function App() {
                 >
                   Сборщик
                 </button>
-              )}
+              ) : null}
               <button 
                 onClick={handleLogOut} 
                 className="p-1.5 rounded-md transition-colors text-gray-500 hover:text-red-600 hover:bg-red-50"
@@ -2568,23 +2594,42 @@ export default function App() {
                 Найдите нужный товар или выберите категорию в меню слева.
               </p>
 
-              <div className="relative mb-8">
+              <div ref={globalSearchRef} className="relative mb-8">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
                 <input 
-                  type="text"
+                  type="search"
+                  name="query"
+                  id="global_search_input"
+                  autoComplete="one-time-code"
+                  data-lpignore="true"
+                  data-1p-ignore
                   placeholder="Поиск по всему каталогу..."
-                  value={globalSearchTerm}
-                  onChange={(e) => setGlobalSearchTerm(e.target.value)}
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleSearch(searchInput);
+                    }
+                  }}
                   className="w-full pl-10 pr-10 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-gray-900"
                 />
-                {globalSearchTerm && (
+                {searchInput && (
                   <button 
-                    onClick={() => setGlobalSearchTerm('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                    onClick={() => {
+                      setSearchInput('');
+                      setGlobalSearchTerm('');
+                    }}
+                    className="absolute right-12 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
                   >
                     <X size={18} />
                   </button>
                 )}
+                <button 
+                  onClick={() => handleSearch(searchInput)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-blue-600 hover:text-blue-700 p-1"
+                >
+                  <ArrowRight size={20} />
+                </button>
               </div>
               
               <div className="relative">
@@ -2827,6 +2872,8 @@ export default function App() {
                   <input 
                     autoFocus
                     type="password"
+                    name="admin_catalog_password"
+                    autoComplete={passwordMode === 'setup' ? 'new-password' : 'current-password'}
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handlePasswordSubmit()}
